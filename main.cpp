@@ -1,14 +1,16 @@
 ﻿/*
- *		 光线追踪（Ray Tracing）
- *	<作者> ：Margoo
- *	<邮箱> ：1683691371@qq.com
+ *	程序名称 ：光线追踪（Ray Tracing）
+ *	作　　者 ：Margoo
+ *	邮　　箱 ：1683691371@qq.com
  */
 #include <algorithm>
 #include <conio.h>
 #include <functional>
 #include <graphics.h>
 #include <intrin.h>
+#include <iomanip>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -73,6 +75,10 @@ class FloatX
 		*FloatData = SSEData.m128_f32[0];
 	}
 	operator double()
+	{
+		return SSEData.m128_f32[0];
+	}
+	operator float() const
 	{
 		return SSEData.m128_f32[0];
 	}
@@ -229,7 +235,7 @@ FloatX Range(FloatX X, FloatX Min, FloatX Max)
 }
 
 /*
- * 三维向量类 Vector3 （同时该类也充当了三维点和颜色）
+ * 三维向量类 Vector3（同时该类也充当了三维点和颜色）
  */
 typedef class Vector3
 {
@@ -300,9 +306,29 @@ typedef class Vector3
 
 		return *this;
 	}
+	static Vector3 RandomToSphere(FloatX Radius, FloatX DistanceSquared)
+	{
+		auto R1 = FloatX(::Random());
+		auto R2 = FloatX(::Random());
+		auto Z = 1.fx + R2 * (FloatX::Sqrt(1.fx - Radius * Radius / DistanceSquared) - 1.fx);
+
+		auto Phi = 2.fx * PI * R1;
+		auto X = FloatX::Cos(Phi) * FloatX::Sqrt(1.fx - Z * Z);
+		auto Y = FloatX::Sin(Phi) * FloatX::Sqrt(1.fx - Z * Z);
+
+		return Vector3(X, Y, Z);
+	}
+	static Vector3 Random()
+	{
+		return Vector3(::Random(), ::Random(), ::Random());
+	}
+	static Vector3 Random(FloatX Min, FloatX Max)
+	{
+		return Vector3(::Random(Min, Max), ::Random(Min, Max), ::Random(Min, Max));
+	}
 	Vector3 &operator/=(const FloatX &Value)
 	{
-		return *this *= 1 / Value;
+		return *this *= 1.fx / Value;
 	}
 
 	FloatX LengthSquared() const
@@ -339,10 +365,20 @@ typedef class Vector3
 		return Vector3(Left.GetX() / Right, Left.GetY() / Right, Left.GetZ() / Right);
 	}
 
+	static Vector3 UnitVector(Vector3 Vector)
+	{
+		return Vector / Vector.Length();
+	}
+
+	static Vector3 RandomUnitVector()
+	{
+		return UnitVector(RandomInUnitSphere());
+	}
+
 	static Vector3 RandomInUnitSphere()
 	{
-		auto A = Random(0.fx, 2.fx * PI);
-		auto Z = Random(-1.fx, 1.fx);
+		auto A = ::Random(0.fx, 2.fx * PI);
+		auto Z = ::Random(-1.fx, 1.fx);
 		auto R = FloatX::Sqrt(1.fx - Z * Z);
 
 		return Vector3(R * FloatX::Cos(A), R * FloatX::Sin(A), Z);
@@ -366,7 +402,7 @@ inline Vector3 Vector3Cross(const Vector3 &Left, const Vector3 &Right)
 }
 inline Vector3 UnitVector(Vector3 Vector)
 {
-	return Vector / Vector.Length();
+	return Vector3::UnitVector(Vector);
 }
 
 /*
@@ -477,6 +513,57 @@ class BVHBox
 };
 
 /*
+ * 标准正交基类
+ */
+class ONB
+{
+  public:
+	ONB()
+	{
+	}
+
+	Vector3 operator[](const int &Position) const
+	{
+		return Axis[Position];
+	}
+
+	Vector3 GetU() const
+	{
+		return Axis[0];
+	}
+	Vector3 GetV() const
+	{
+		return Axis[1];
+	}
+	Vector3 GetW() const
+	{
+		return Axis[2];
+	}
+
+	Vector3 Local(FloatX A, FloatX B, FloatX C) const
+	{
+		return A * GetU() + B * GetV() + C * GetW();
+	}
+	Vector3 Local(const Vector3 &A) const
+	{
+		return A.GetX() * GetU() + A.GetY() * GetV() + A.GetZ() * GetW();
+	}
+
+	void BuildFromW(const Vector3 &N)
+	{
+		Axis[2] = UnitVector(N);
+
+		Vector3 A = (fabs(GetW().GetX()) > 0.9) ? Vector3(0.fx, 1.fx, 0.fx) : Vector3(1.fx, 0.fx, 0.fx);
+
+		Axis[1] = UnitVector(Vector3Cross(GetW(), A));
+		Axis[0] = Vector3Cross(GetW(), GetV());
+	}
+
+  public:
+	Vector3 Axis[3];
+};
+
+/*
  * 一个三维对象的材质基类
  */
 class ObjectMaterial;
@@ -501,6 +588,62 @@ struct HitData
 	}
 };
 
+class PDF;
+
+Vector3 RandomCosineDirection()
+{
+	auto R1 = FloatX(Random());
+	auto R2 = FloatX(Random());
+	auto Z = FloatX::Sqrt(1.fx - R2);
+
+	auto PHI = 2.fx * PI * R1;
+	auto X = FloatX::Cos(PHI) * FloatX::Sqrt(R2);
+	auto Y = FloatX::Sin(PHI) * FloatX::Sqrt(R2);
+
+	return Vector3(X, Y, Z);
+}
+
+struct ScatterData
+{
+	Ray SpecularRay;
+	bool IsSpecular;
+	Vector3 Attenuation;
+	PDF *PDF;
+};
+class PDF
+{
+  public:
+	virtual ~PDF()
+	{
+	}
+
+	virtual FloatX GetValue(const Vector3 &Direction) const = 0;
+	virtual Vector3 Generate() const = 0;
+};
+
+class CosinePDF : public PDF
+{
+  public:
+	CosinePDF(const Vector3 &W)
+	{
+		UVW.BuildFromW(W);
+	}
+
+	FloatX GetValue(const Vector3 &Direction) const override
+	{
+		auto Cosine = Vector3Dot(UnitVector(Direction), UVW.GetW());
+
+		return (Cosine <= 0.fx) ? 0.fx : Cosine / PI;
+	}
+	Vector3 Generate() const override
+	{
+		return UVW.Local(RandomCosineDirection());
+	}
+
+  public:
+	ONB UVW;
+};
+
 /*
  * 材质基类
  */
@@ -510,15 +653,20 @@ class ObjectMaterial
 	/*
 	 * 用于实现光源的 Emitted，如果该物质本身不发光，返回纯黑
 	 */
-	virtual Vector3 Emitted(FloatX U, FloatX V, const Vector3 &RayData)
+	virtual Vector3 Emitted(FloatX U, FloatX V, const HitData &Data, const Vector3 &RayData)
 	{
 		return Vector3(0.fx, 0.fx, 0.fx);
 	}
-	/*
-	 * 材质的光散射
-	 */
-	virtual bool LightScatter(const Ray &RayIn, const HitData &Data, Vector3 &AttenuationLevel,
-							  Ray &ScatterRay) const = 0;
+
+	virtual bool Scatter(const Ray &RayIn, const HitData &HitData, ScatterData &ScatterData) const
+	{
+		return false;
+	}
+
+	virtual double ScatteringPDF(const Ray &RayIn, const HitData &HitData, const Ray &ScatteredRay) const
+	{
+		return 0;
+	}
 
   public:
 	/*
@@ -542,7 +690,6 @@ class Texture
 /*
  * 固定颜色的材质
  */
-
 class ConstantTexture : public Texture
 {
   public:
@@ -592,7 +739,7 @@ class CheckerTexture : public Texture
 };
 
 /*
- * 漫反射材质
+ * 漫反射材质（又名朗伯材质）
  */
 class LambertianMaterial : public ObjectMaterial
 {
@@ -600,35 +747,40 @@ class LambertianMaterial : public ObjectMaterial
 	LambertianMaterial(Texture *MaterialTexture) : Texture(MaterialTexture)
 	{
 	}
-	bool LightScatter(const Ray &RayIn, const HitData &Data, Vector3 &AttenuationLevel, Ray &ScatterRay) const override
+	bool Scatter(const Ray &RayIn, const HitData &HitData, ScatterData &ScatterData) const override
 	{
-		Vector3 ScatterDirection = Data.NormalSurface + Vector3::RandomInUnitSphere();
-		ScatterRay = Ray(Data.RayData, ScatterDirection);
-		AttenuationLevel = Texture->GetValue(Data.U, Data.V, Data.RayData);
+		ScatterData.IsSpecular = false;
+		ScatterData.Attenuation = Texture->GetValue(HitData.U, HitData.V, HitData.RayData);
+		ScatterData.PDF = new CosinePDF(HitData.NormalSurface);
 
 		return true;
+	}
+	double ScatteringPDF(const Ray &RayIn, const HitData &HitData, const Ray &ScatteredRay) const override
+	{
+		auto Cosine = Vector3Dot(HitData.NormalSurface, UnitVector(ScatteredRay.Direction));
+		return Cosine < 0.fx ? 0.fx : Cosine / PI;
 	}
 
   public:
 	Texture *Texture;
 };
 
-/*
- * 金属材质
- */
 class MetalMaterial : public ObjectMaterial
 {
   public:
 	MetalMaterial(const Vector3 &Albedo, FloatX Fuzz) : MaterialAlbedo(Albedo), MetalFuzz(Fuzz < 1.fx ? Fuzz : 1.fx)
 	{
 	}
-	bool LightScatter(const Ray &RayIn, const HitData &Data, Vector3 &AttenuationLevel, Ray &ScatterRay) const override
+	bool Scatter(const Ray &RayIn, const HitData &HitData, ScatterData &ScatterData) const override
 	{
-		Vector3 ScatterDirection = Reflect(UnitVector(RayIn.Direction), Data.NormalSurface);
-		ScatterRay = Ray(Data.RayData, ScatterDirection + MetalFuzz * Vector3::RandomInUnitSphere());
-		AttenuationLevel = MaterialAlbedo;
+		Vector3 Reflected = Reflect(UnitVector(RayIn.Direction), HitData.NormalSurface);
 
-		return Vector3Dot(ScatterRay.Direction, Data.NormalSurface) > 0;
+		ScatterData.SpecularRay = Ray(HitData.RayData, Reflected + MetalFuzz * Vector3::RandomInUnitSphere());
+		ScatterData.Attenuation = MaterialAlbedo;
+		ScatterData.IsSpecular = true;
+		ScatterData.PDF = 0;
+
+		return true;
 	}
 
   public:
@@ -636,43 +788,36 @@ class MetalMaterial : public ObjectMaterial
 	Vector3 MaterialAlbedo;
 };
 
-/*
- * 绝缘体（一般是玻璃）材质
- */
 class DielectricMaterial : public ObjectMaterial
 {
   public:
 	DielectricMaterial(FloatX RefractiveIndex) : MaterialRefractiveIndex(RefractiveIndex)
 	{
 	}
-	bool LightScatter(const Ray &RayIn, const HitData &Data, Vector3 &AttenuationLevel, Ray &ScatterRay) const override
+	bool Scatter(const Ray &RayIn, const HitData &HitData, ScatterData &ScatterData) const override
 	{
-		AttenuationLevel = Vector3(1.fx, 1.fx, 1.fx);
-		FloatX EtaiOverEtat = (Data.FrontFace) ? (1.fx / MaterialRefractiveIndex) : (MaterialRefractiveIndex);
+		ScatterData.IsSpecular = true;
+		ScatterData.PDF = nullptr;
+		ScatterData.Attenuation = Vector3(1.0fx, 1.0fx, 1.0fx);
+		FloatX RefractionRatio = HitData.FrontFace ? (1.0fx / MaterialRefractiveIndex) : MaterialRefractiveIndex;
 
 		Vector3 UnitDirection = UnitVector(RayIn.Direction);
-		FloatX CosTheta = FloatX::Min(Vector3Dot(-UnitDirection, Data.NormalSurface), 1.fx);
-		FloatX SinTheta = FloatX::Sqrt(1.fx - CosTheta * CosTheta);
+		FloatX CosTheta = FloatX::Min(Vector3Dot(-UnitDirection, HitData.NormalSurface), 1.0fx);
+		FloatX SinTheta = FloatX::Sqrt(1.0fx - CosTheta * CosTheta);
 
-		if (EtaiOverEtat * SinTheta > 1.fx)
+		bool AbleToRefract = RefractionRatio * SinTheta > 1.0;
+		Vector3 Direction;
+
+		if (AbleToRefract || Schlick(CosTheta, RefractionRatio) > Random())
 		{
-			Vector3 ReflectedRay = Reflect(UnitDirection, Data.NormalSurface);
-			ScatterRay = Ray(Data.RayData, ReflectedRay);
-
-			return true;
+			Direction = Reflect(UnitDirection, HitData.NormalSurface);
+		}
+		else
+		{
+			Direction = Refract(UnitDirection, HitData.NormalSurface, RefractionRatio);
 		}
 
-		FloatX ReflectProb = Schlick(CosTheta, EtaiOverEtat);
-		if (Random() < ReflectProb)
-		{
-			Vector3 ReflectedRay = Reflect(UnitDirection, Data.NormalSurface);
-			ScatterRay = Ray(Data.RayData, ReflectedRay);
-
-			return true;
-		}
-
-		Vector3 ReflectedRay = Refract(UnitDirection, Data.NormalSurface, EtaiOverEtat);
-		ScatterRay = Ray(Data.RayData, ReflectedRay);
+		ScatterData.SpecularRay = Ray(HitData.RayData, Direction);
 
 		return true;
 	}
@@ -687,9 +832,6 @@ class DielectricMaterial : public ObjectMaterial
 
 		return OutParallel + OutPerp;
 	}
-	/*
-	 * Christophe Schlick 提出的折射率计算方法
-	 */
 	FloatX Schlick(FloatX Cos, FloatX RefractiveIndex) const
 	{
 		auto R0 = (1.fx - RefractiveIndex) / (1.fx + RefractiveIndex);
@@ -712,16 +854,19 @@ class DiffuseLight : public ObjectMaterial
 	{
 	}
 
-	bool LightScatter(const Ray &RayIn, const HitData &Data, Vector3 &AttenuationLevel, Ray &ScatterRay) const override
-	{
-		return false;
-	}
 	/*
 	 * 光源则返回光源的颜色
 	 */
-	Vector3 Emitted(FloatX U, FloatX V, const Vector3 &RayData)
+	Vector3 Emitted(FloatX U, FloatX V, const HitData &Data, const Vector3 &RayData) override
 	{
-		return LightColor;
+		if (Data.FrontFace)
+		{
+			return LightColor;
+		}
+		else
+		{
+			return Vector3(0.fx, 0.fx, 0.fx);
+		}
 	}
 
   public:
@@ -735,6 +880,15 @@ class HitTestBase
 	// 用于 BVH 优化的盒型模型
 	virtual bool HittingBox(FloatX T0, FloatX T1, BVHBox &Box) const = 0;
 
+	virtual FloatX PDFValue(const Vector3 &OriginPoint, const Vector3 &Vector) const
+	{
+		return 0.fx;
+	}
+	virtual Vector3 Random(const Vector3 &Origin) const
+	{
+		return Vector3(1.fx, 0.fx, 0.fx);
+	}
+
 	BVHBox GetBox(const BVHBox &FirstBox, const BVHBox &SecondBox) const
 	{
 		Vector3 Min(FloatX::Min(FirstBox.BoxMin.GetX(), SecondBox.BoxMin.GetX()),
@@ -747,7 +901,285 @@ class HitTestBase
 		return BVHBox(Min, Max);
 	}
 };
+class ObjectHitPDF : public PDF
+{
+  public:
+	ObjectHitPDF(HitTestBase *Object, const Vector3 &Origin) : ObjectRef(Object), OriginPoint(Origin)
+	{
+	}
 
+	FloatX GetValue(const Vector3 &Direction) const override
+	{
+		return ObjectRef->PDFValue(OriginPoint, Direction);
+	}
+	Vector3 Generate() const override
+	{
+		return ObjectRef->Random(OriginPoint);
+	}
+
+  public:
+	Vector3 OriginPoint;
+	HitTestBase *ObjectRef;
+};
+
+class XYRect : public HitTestBase
+{
+  public:
+	XYRect() : Material(nullptr)
+	{
+	}
+
+	XYRect(FloatX IX0, FloatX IX1, FloatX IY0, FloatX IY1, FloatX IK, ObjectMaterial *IMaterial)
+		: X0(IX0), X1(IX1), Y0(IY0), Y1(IY1), K(IK), Material(IMaterial)
+	{
+	}
+
+	FloatX PDFValue(const Vector3 &Origin, const Vector3 &Vector) const override
+	{
+		HitData Data;
+		if (!HitTest(Ray(Origin, Vector), 0.001fx, Inf, Data))
+		{
+			return 0.fx;
+		}
+
+		auto Area = (X1 - X0) * (Y1 - Y0);
+		auto DistanceSuqared = Data.T * Data.T * Vector.LengthSquared();
+		auto Cosine = FloatX(fabs(Vector3Dot(Vector, Data.NormalSurface) / Vector.Length()));
+
+		return DistanceSuqared / (Cosine * Area);
+	}
+	Vector3 Random(const Vector3 &Origin) const override
+	{
+		auto RandomPoint = Vector3(::Random(X0, X1), ::Random(Y0, Y1), K);
+		return RandomPoint - Origin;
+	}
+
+	bool HitTest(const Ray &RayInstance, FloatX T0, FloatX T1, HitData &Data) const override
+	{
+		auto T = (K - RayInstance.LightOrigin.GetZ()) / RayInstance.Direction.GetZ();
+		if (T < T0 || T > T1)
+		{
+			return false;
+		}
+
+		auto X = RayInstance.LightOrigin.GetX() + T * RayInstance.Direction.GetX();
+		auto Y = RayInstance.LightOrigin.GetY() + T * RayInstance.Direction.GetY();
+
+		float OX0;
+		float OX1;
+		float OY0;
+		float OY1;
+
+		OX0 = (const float)X0;
+		OX1 = (const float)X1;
+		OY0 = (const float)Y0;
+		OY1 = (const float)Y1;
+
+		if (X < OX0 || X > OX1 || Y < OY0 || Y > OY1)
+		{
+			return false;
+		}
+
+		Data.U = (X - OX0) / (OX1 - OX0);
+		Data.V = (Y - OY0) / (OY1 - OY0);
+		Data.T = T;
+
+		Vector3 OutwardNormal = Vector3(0.fx, 0.fx, 1.fx);
+
+		Data.SetSurfaceNormal(RayInstance, OutwardNormal);
+		Data.Material = Material;
+		Data.RayData = RayInstance.LightAt(T);
+
+		return true;
+	}
+	bool HittingBox(FloatX T0, FloatX T1, BVHBox &Box) const override
+	{
+		Box = BVHBox(Vector3(X0, Y0, K - 0.0001fx), Vector3(X1, Y1, K + 0.001fx));
+
+		return true;
+	}
+
+  public:
+	FloatX X0;
+	FloatX X1;
+	FloatX Y0;
+	FloatX Y1;
+	FloatX K;
+
+	ObjectMaterial *Material;
+};
+class XZRect : public HitTestBase
+{
+  public:
+	XZRect() : Material(nullptr)
+	{
+	}
+
+	XZRect(FloatX IX0, FloatX IX1, FloatX IZ0, FloatX IZ1, FloatX IK, ObjectMaterial *IMaterial)
+		: X0(IX0), X1(IX1), Z0(IZ0), Z1(IZ1), K(IK), Material(IMaterial)
+	{
+	}
+
+	bool HitTest(const Ray &RayInstance, FloatX T0, FloatX T1, HitData &Data) const override
+	{
+		auto T = (K - RayInstance.LightOrigin.GetY()) / RayInstance.Direction.GetY();
+		if (T < T0 || T > T1)
+		{
+			return false;
+		}
+
+		auto X = RayInstance.LightOrigin.GetX() + T * RayInstance.Direction.GetX();
+		auto Z = RayInstance.LightOrigin.GetZ() + T * RayInstance.Direction.GetZ();
+
+		float OX0;
+		float OX1;
+		float OZ0;
+		float OZ1;
+
+		OX0 = (const float)X0;
+		OX1 = (const float)X1;
+		OZ0 = (const float)Z0;
+		OZ1 = (const float)Z1;
+
+		if (X < OX0 || X > OX1 || Z < OZ0 || Z > OZ1)
+		{
+			return false;
+		}
+
+		Data.U = (X - OX0) / (OX1 - OX0);
+		Data.V = (Z - OZ0) / (OZ1 - OZ0);
+		Data.T = T;
+
+		Vector3 OutwardNormal = Vector3(0.fx, 1.fx, 0.fx);
+
+		Data.SetSurfaceNormal(RayInstance, OutwardNormal);
+		Data.Material = Material;
+		Data.RayData = RayInstance.LightAt(T);
+
+		return true;
+	}
+	bool HittingBox(FloatX T0, FloatX T1, BVHBox &Box) const override
+	{
+		Box = BVHBox(Vector3(X0, K - 0.0001fx, Z0), Vector3(X1, K + 0.001fx, Z1));
+
+		return true;
+	}
+
+	FloatX PDFValue(const Vector3 &Origin, const Vector3 &Vector) const override
+	{
+		HitData Data;
+		if (!HitTest(Ray(Origin, Vector), 0.001fx, Inf, Data))
+		{
+			return 0.fx;
+		}
+
+		auto Area = (X1 - X0) * (Z1 - Z0);
+		auto DistanceSuqared = Data.T * Data.T * Vector.LengthSquared();
+		auto Cosine = FloatX(fabs(Vector3Dot(Vector, Data.NormalSurface) / Vector.Length()));
+
+		return DistanceSuqared / (Cosine * Area);
+	}
+	Vector3 Random(const Vector3 &Origin) const override
+	{
+		auto RandomPoint = Vector3(::Random(X0, X1), K, ::Random(Z0, Z1));
+		return RandomPoint - Origin;
+	}
+
+  public:
+	FloatX X0;
+	FloatX X1;
+	FloatX Z0;
+	FloatX Z1;
+	FloatX K;
+
+	ObjectMaterial *Material;
+};
+class YZRect : public HitTestBase
+{
+  public:
+	YZRect() : Material(nullptr)
+	{
+	}
+
+	YZRect(FloatX IY0, FloatX IY1, FloatX IZ0, FloatX IZ1, FloatX IK, ObjectMaterial *IMaterial)
+		: Y0(IY0), Y1(IY1), Z0(IZ0), Z1(IZ1), K(IK), Material(IMaterial)
+	{
+	}
+
+	FloatX PDFValue(const Vector3 &Origin, const Vector3 &Vector) const override
+	{
+		HitData Data;
+		if (!HitTest(Ray(Origin, Vector), 0.001fx, Inf, Data))
+		{
+			return 0.fx;
+		}
+
+		auto Area = (Y1 - Y0) * (Y1 - Y0);
+		auto DistanceSuqared = Data.T * Data.T * Vector.LengthSquared();
+		auto Cosine = FloatX(fabs(Vector3Dot(Vector, Data.NormalSurface) / Vector.Length()));
+
+		return DistanceSuqared / (Cosine * Area);
+	}
+	Vector3 Random(const Vector3 &Origin) const override
+	{
+		auto RandomPoint = Vector3(K, ::Random(Y0, Y1), ::Random(Y0, Y1));
+		return RandomPoint - Origin;
+	}
+
+	bool HitTest(const Ray &RayInstance, FloatX T0, FloatX T1, HitData &Data) const override
+	{
+		auto T = (K - RayInstance.LightOrigin.GetX()) / RayInstance.Direction.GetX();
+		if (T < T0 || T > T1)
+		{
+			return false;
+		}
+
+		auto Y = RayInstance.LightOrigin.GetY() + T * RayInstance.Direction.GetY();
+		auto Z = RayInstance.LightOrigin.GetZ() + T * RayInstance.Direction.GetZ();
+
+		float OY0;
+		float OY1;
+		float OZ0;
+		float OZ1;
+
+		OY0 = (const float)Y0;
+		OY1 = (const float)Y1;
+		OZ0 = (const float)Z0;
+		OZ1 = (const float)Z1;
+
+		if (Y < OY0 || Y > OY1 || Z < OZ0 || Z > OZ1)
+		{
+			return false;
+		}
+
+		Data.U = (Y - OY0) / (OY1 - OY0);
+		Data.V = (Z - OZ0) / (OZ1 - OZ0);
+		Data.T = T;
+
+		Vector3 OutwardNormal = Vector3(1.fx, 0.fx, 0.fx);
+
+		Data.SetSurfaceNormal(RayInstance, OutwardNormal);
+		Data.Material = Material;
+		Data.RayData = RayInstance.LightAt(T);
+
+		return true;
+	}
+	bool HittingBox(FloatX T0, FloatX T1, BVHBox &BoY) const override
+	{
+		BoY = BVHBox(Vector3(K - 0.0001fx, Y0, Z0), Vector3(K + 0.0001fx, Y1, Z1));
+
+		return true;
+	}
+
+  public:
+	FloatX Y0;
+	FloatX Y1;
+	FloatX Z0;
+	FloatX Z1;
+	FloatX K;
+
+	ObjectMaterial *Material;
+};
 class SphereObject : public HitTestBase
 {
   public:
@@ -757,6 +1189,30 @@ class SphereObject : public HitTestBase
 	SphereObject(Vector3 Center, FloatX SphereRadius, ObjectMaterial *ObjectrMaterial)
 		: CenterPoint(Center), Radius(SphereRadius), Material(ObjectrMaterial)
 	{
+	}
+
+	FloatX PDFValue(const Vector3 &Origin, const Vector3 &Vector) const override
+	{
+		HitData Data;
+		if (!HitTest(Ray(Origin, Vector), 0.001fx, Inf, Data))
+		{
+			return 0.fx;
+		}
+
+		auto CosThetaMax = FloatX::Sqrt(1.fx - Radius * Radius / (CenterPoint - Origin).LengthSquared());
+		auto SolidAngle = 2.fx * PI * (1.fx - CosThetaMax);
+
+		return 1.fx / SolidAngle;
+	}
+	Vector3 Random(const Vector3 &Origin) const override
+	{
+		Vector3 Direction = CenterPoint - Origin;
+		auto DistanceSquared = Direction.LengthSquared();
+
+		ONB UVW;
+		UVW.BuildFromW(Direction);
+
+		return UVW.Local(Vector3::RandomToSphere(Radius, DistanceSquared));
 	}
 
 	bool HitTest(const Ray &RayInstance, FloatX MinT, FloatX MaxT, HitData &Data) const override
@@ -818,6 +1274,31 @@ class SphereObject : public HitTestBase
 	FloatX Radius;
 	ObjectMaterial *Material;
 };
+class FlipFace : public HitTestBase
+{
+  public:
+	FlipFace(HitTestBase *Object) : ObjectRef(Object)
+	{
+	}
+
+	bool HitTest(const Ray &Instance, FloatX TMin, FloatX TMax, HitData &Data) const override
+	{
+		if (!ObjectRef->HitTest(Instance, TMin, TMax, Data))
+		{
+			return false;
+		}
+
+		Data.FrontFace = !Data.FrontFace;
+		return true;
+	}
+	bool HittingBox(FloatX T0, FloatX T1, BVHBox &Box) const override
+	{
+		return ObjectRef->HittingBox(T0, T1, Box);
+	}
+
+  public:
+	HitTestBase *ObjectRef;
+};
 
 typedef class ObjectList : public HitTestBase
 {
@@ -837,6 +1318,30 @@ typedef class ObjectList : public HitTestBase
 	void PushObject(HitTestBase *Object)
 	{
 		Objects.push_back(Object);
+	}
+
+	FloatX PDFValue(const Vector3 &Origin, const Vector3 &Vector) const override
+	{
+		auto Weight = 1.fx / FloatX(Objects.size());
+		auto Sum = 0.fx;
+
+		for (auto Object : Objects)
+		{
+			Sum += Weight * Object->PDFValue(Origin, Vector);
+		}
+
+		return Sum;
+	}
+	Vector3 Random(const Vector3 &OriginPoint) const override
+	{
+		if (Objects.size() > 1)
+		{
+			return Objects[rand() % (Objects.size())]->Random(OriginPoint);
+		}
+		else if (!Objects.empty())
+		{
+			return Objects[0]->Random(OriginPoint);
+		}
 	}
 
 	bool HitTest(const Ray &RayInstance, FloatX MinT, FloatX MaxT, HitData &Data) const override
@@ -888,6 +1393,169 @@ typedef class ObjectList : public HitTestBase
   public:
 	std::vector<HitTestBase *> Objects;
 } TraceWorld;
+
+class Translate : public HitTestBase
+{
+  public:
+	Translate(HitTestBase *Object, const Vector3 &Displacement) : ObjectRef(Object), PlaceOffset(Displacement)
+	{
+	}
+
+	bool HitTest(const Ray &RayInstance, FloatX TMin, FloatX TMax, HitData &Data) const override
+	{
+		Ray OffsetRay(RayInstance.LightOrigin - PlaceOffset, RayInstance.Direction);
+		if (!ObjectRef->HitTest(OffsetRay, TMin, TMax, Data))
+		{
+			return false;
+		}
+
+		Data.RayData += PlaceOffset;
+		Data.SetSurfaceNormal(OffsetRay, Data.NormalSurface);
+
+		return true;
+	}
+	bool HittingBox(FloatX T0, FloatX T1, BVHBox &Box) const override
+	{
+		if (!ObjectRef->HittingBox(T0, T1, Box))
+		{
+			return false;
+		}
+
+		Box = BVHBox(Box.BoxMin + PlaceOffset, Box.BoxMax + PlaceOffset);
+
+		return true;
+	}
+
+  public:
+	HitTestBase *ObjectRef;
+	Vector3 PlaceOffset;
+};
+class RotateY : public HitTestBase
+{
+  public:
+	RotateY(HitTestBase *Object, FloatX RotateAngle)
+	{
+		ObjectRef = Object;
+		auto Radians = DegreesToRadians(RotateAngle);
+		SinTheta = FloatX::Sin(Radians);
+		CosTheta = FloatX::Cos(Radians);
+		HasBox = Object->HittingBox(0.fx, 1.fx, Box);
+
+		Vector3 Min(Inf, Inf, Inf);
+		Vector3 Max(-Inf, -Inf, -Inf);
+
+		for (FloatX I = 0.fx; I < 2.fx; I += 1.fx)
+		{
+			for (FloatX J = 0.fx; J < 2.fx; J += 1.fx)
+			{
+				for (FloatX K = 0.fx; K < 2.fx; K += 1.fx)
+				{
+					auto X = I * Box.BoxMax.GetX() + (1.fx - I) * Box.BoxMin.GetX();
+					auto Y = J * Box.BoxMax.GetY() + (1.fx - J) * Box.BoxMin.GetY();
+					auto Z = K * Box.BoxMax.GetZ() + (1.fx - K) * Box.BoxMin.GetZ();
+
+					auto NewX = CosTheta * X + SinTheta * Z;
+					auto NewZ = -SinTheta * X + CosTheta * Z;
+
+					Vector3 Resever(NewX, Y, NewZ);
+
+					for (FloatX M = 0.fx; M < 3.fx; M += 1.fx)
+					{
+						Min[M] = FloatX::Min(Min[M], Resever[M]);
+						Max[M] = FloatX::Max(Max[M], Resever[M]);
+					}
+				}
+			}
+		}
+
+		Box = BVHBox(Min, Max);
+	}
+	bool HitTest(const Ray &RayInstance, FloatX TMin, FloatX TMax, HitData &Data) const
+	{
+		Vector3 LightOrigin = RayInstance.LightOrigin;
+		Vector3 LightDirection = RayInstance.Direction;
+
+		LightOrigin[0] = CosTheta * RayInstance.LightOrigin[0] - SinTheta * RayInstance.LightOrigin[2];
+		LightOrigin[2] = SinTheta * RayInstance.LightOrigin[0] + CosTheta * RayInstance.LightOrigin[2];
+
+		LightDirection[0] = CosTheta * RayInstance.Direction[0] - SinTheta * RayInstance.Direction[2];
+		LightDirection[2] = SinTheta * RayInstance.Direction[0] + CosTheta * RayInstance.Direction[2];
+
+		Ray RotatedRay(LightOrigin, LightDirection);
+		if (!ObjectRef->HitTest(RotatedRay, TMin, TMax, Data))
+		{
+			return false;
+		}
+
+		Vector3 RayData = Data.RayData;
+		Vector3 SurfaceNormal = Data.NormalSurface;
+
+		RayData[0] = CosTheta * Data.RayData[0] + SinTheta * Data.RayData[2];
+		RayData[2] = -SinTheta * Data.RayData[0] + CosTheta * Data.RayData[2];
+
+		SurfaceNormal[0] = CosTheta * Data.NormalSurface[0] + SinTheta * Data.NormalSurface[2];
+		SurfaceNormal[2] = -SinTheta * Data.NormalSurface[0] + CosTheta * Data.NormalSurface[2];
+
+		Data.RayData = RayData;
+		Data.SetSurfaceNormal(RotatedRay, SurfaceNormal);
+
+		return true;
+	}
+	bool HittingBox(FloatX T0, FloatX T1, BVHBox &OutputBox) const
+	{
+		OutputBox = Box;
+
+		return HasBox;
+	}
+
+  public:
+	HitTestBase *ObjectRef;
+	FloatX SinTheta;
+	FloatX CosTheta;
+	bool HasBox;
+	BVHBox Box;
+};
+
+class Cube : public HitTestBase
+{
+  public:
+	Cube() = default;
+	Cube(const Vector3 &Point0, const Vector3 &Point1, ObjectMaterial *Material)
+	{
+		BoxMin = Point0;
+		BoxMax = Point1;
+
+		Sides.PushObject(
+			new XYRect(Point0.GetX(), Point1.GetX(), Point0.GetY(), Point1.GetY(), Point1.GetZ(), Material));
+		Sides.PushObject(new FlipFace(
+			new XYRect(Point0.GetX(), Point1.GetX(), Point0.GetY(), Point1.GetY(), Point0.GetZ(), Material)));
+
+		Sides.PushObject(
+			new XZRect(Point0.GetX(), Point1.GetX(), Point0.GetZ(), Point1.GetZ(), Point1.GetY(), Material));
+		Sides.PushObject(new FlipFace(
+			new XZRect(Point0.GetX(), Point1.GetX(), Point0.GetZ(), Point1.GetZ(), Point0.GetY(), Material)));
+
+		Sides.PushObject(
+			new YZRect(Point0.GetY(), Point1.GetY(), Point0.GetZ(), Point1.GetZ(), Point1.GetX(), Material));
+		Sides.PushObject(new FlipFace(
+			new YZRect(Point0.GetY(), Point1.GetY(), Point0.GetZ(), Point1.GetZ(), Point0.GetX(), Material)));
+	}
+	bool HitTest(const Ray &RayInstance, FloatX T0, FloatX T1, HitData &Data) const override
+	{
+		return Sides.HitTest(RayInstance, T0, T1, Data);
+	}
+	bool HittingBox(FloatX T0, FloatX T1, BVHBox &Box) const
+	{
+		Box = BVHBox(BoxMin, BoxMax);
+
+		return true;
+	}
+
+  public:
+	Vector3 BoxMin;
+	Vector3 BoxMax;
+	TraceWorld Sides;
+};
 
 typedef class BVHRoot : public HitTestBase
 {
@@ -995,29 +1663,50 @@ typedef class BVHRoot : public HitTestBase
 class Camera
 {
   public:
-	Camera(Vector3 LookFrom, Vector3 LookAt, Vector3 VUP, FloatX VFov, FloatX Aspect)
+	static Vector3 RandomInUnitDisk()
+	{
+		while (true)
+		{
+			auto Point = Vector3(Random(-1.fx, 1.fx), Random(-1.fx, 1.fx), 0.fx);
+			if (Point.LengthSquared() >= 1.fx)
+			{
+				continue;
+			}
+
+			return Point;
+		}
+	}
+
+  public:
+	Camera(Vector3 LookFrom, Vector3 LookAt, Vector3 VUP, FloatX VFov, FloatX Aspect, FloatX Aperture, FloatX FocusDist)
 	{
 		OriginPoint = LookFrom;
-
-		Vector3 U, V, W;
+		LensRadius = Aperture / 2.fx;
 
 		auto Theta = DegreesToRadians(VFov);
-		auto HalfHeight = FloatX::Tan(Theta / 2.fx);
-		auto HalfWidth = Aspect * HalfHeight;
+		auto ViewHeight = 2.0fx * FloatX::Tan(Theta / 2.fx);
+		auto ViewWidth = Aspect * ViewHeight;
 
 		W = UnitVector(LookFrom - LookAt);
 		U = UnitVector(Vector3Cross(VUP, W));
 		V = Vector3Cross(W, U);
 
-		LowerLeftCorner = OriginPoint - HalfWidth * U - HalfHeight * V - W;
+		Horizontal = FocusDist * ViewWidth * U;
+		Vertical = FocusDist * ViewHeight * V;
 
-		Horizontal = 2.fx * HalfWidth * U;
-		Vertical = 2.fx * HalfHeight * V;
+		LowerLeftCorner = OriginPoint - Horizontal / 2 - Vertical / 2 - FocusDist * W;
+	}
+	Camera(Vector3 LookFrom, Vector3 LookAt, Vector3 VUP, FloatX VFov, FloatX Aspect)
+		: Camera(LookFrom, LookAt, VUP, VFov, Aspect, 0.fx, 1.fx)
+	{
 	}
 
-	Ray GetRay(FloatX U, FloatX V)
+	Ray GetRay(FloatX S, FloatX T)
 	{
-		return Ray(OriginPoint, LowerLeftCorner + U * Horizontal + V * Vertical - OriginPoint);
+		Vector3 Radius = LensRadius * RandomInUnitDisk();
+		Vector3 Offset = U * Radius.GetX() + V * Radius.GetY();
+
+		return Ray(OriginPoint + Offset, LowerLeftCorner + S * Horizontal + T * Vertical - OriginPoint - Offset);
 	}
 
   public:
@@ -1025,14 +1714,82 @@ class Camera
 	Vector3 LowerLeftCorner;
 	Vector3 Horizontal;
 	Vector3 Vertical;
+	Vector3 U;
+	Vector3 V;
+	Vector3 W;
+	FloatX LensRadius;
 };
+
+class MixturePDF : public PDF
+{
+  public:
+	MixturePDF(PDF *Object1, PDF *Object2)
+	{
+		PDFList[0] = Object1;
+		PDFList[1] = Object2;
+	}
+
+	FloatX GetValue(const Vector3 &Direction) const override
+	{
+		return 0.5fx * PDFList[0]->GetValue(Direction) + 0.5fx * PDFList[1]->GetValue(Direction);
+	}
+
+	Vector3 Generate() const override
+	{
+		if (Random() < 0.5fx)
+		{
+			return PDFList[0]->Generate();
+		}
+		else
+		{
+			return PDFList[1]->Generate();
+		}
+	}
+
+  public:
+	PDF *PDFList[2];
+};
+
+bool IsBadPoint(const Vector3 &Vector)
+{
+	auto R = float(Vector[0]);
+	auto G = float(Vector[1]);
+	auto B = float(Vector[2]);
+
+	bool Flag = false;
+
+	if (R != R || G != G || B != B)
+	{
+		Flag = true;
+	}
+
+	return Flag;
+}
 
 DWORD GetRawColor(const Vector3 &Vector, FloatX SamplePerPixel)
 {
+	auto R = Vector[0];
+	auto G = Vector[1];
+	auto B = Vector[2];
+
+	if (R != R)
+	{
+		R = 0.f;
+	}
+	if (G != G)
+	{
+		G = 0.f;
+	}
+	if (B != B)
+	{
+		B = 0.f;
+	}
+
 	auto Scale = 1.fx / SamplePerPixel;
-	auto R = FloatX::Sqrt(Scale * Vector[0]);
-	auto G = FloatX::Sqrt(Scale * Vector[1]);
-	auto B = FloatX::Sqrt(Scale * Vector[2]);
+
+	R = FloatX::Sqrt(Scale * R);
+	G = FloatX::Sqrt(Scale * G);
+	B = FloatX::Sqrt(Scale * B);
 
 	return RGB(Range(B, 0.fx, 0.999fx) * 256.fx, Range(G, 0.fx, 0.999fx) * 256.fx, Range(R, 0.fx, 0.999fx) * 256.fx);
 }
@@ -1045,10 +1802,11 @@ template <class Type> Type OppositeCoordinate(const Type &X, const Type &Y, cons
 	return (Height - Y - 1) * Width + X;
 }
 
+TraceWorld GlobalLight;
 /*
  * 渲染函数
  */
-Vector3 RayColor(const Ray &RayObject, HitTestBase *World, int Depth)
+Vector3 RayColor(const Ray &RayObject, HitTestBase *World, HitTestBase *Light, int Depth)
 {
 	HitData Data;
 
@@ -1064,14 +1822,32 @@ Vector3 RayColor(const Ray &RayObject, HitTestBase *World, int Depth)
 
 	Ray ScatteredRay;
 	Vector3 Attenuation;
-	Vector3 Emitted = Data.Material->Emitted(Data.U, Data.V, Data.RayData);
+	Vector3 Emitted = Data.Material->Emitted(Data.U, Data.V, Data, Data.RayData);
+	FloatX PDFValue;
 
-	if (!Data.Material->LightScatter(RayObject, Data, Attenuation, ScatteredRay))
+	ScatterData ScatterData;
+
+	if (!Data.Material->Scatter(RayObject, Data, ScatterData))
 	{
 		return Emitted;
 	}
 
-	return Emitted + Attenuation * RayColor(ScatteredRay, World, Depth - 1);
+	if (ScatterData.IsSpecular)
+	{
+		return ScatterData.Attenuation * RayColor(ScatterData.SpecularRay, World, Light, Depth - 1);
+	}
+
+	auto LightPDF = new ObjectHitPDF(&GlobalLight, Data.RayData);
+	MixturePDF MixedPDF(LightPDF, ScatterData.PDF);
+
+	ScatteredRay = Ray(Data.RayData, MixedPDF.Generate());
+	PDFValue = MixedPDF.GetValue(ScatteredRay.Direction);
+
+	delete LightPDF;
+	delete ScatterData.PDF;
+
+	return Emitted + ScatterData.Attenuation * Data.Material->ScatteringPDF(RayObject, Data, ScatteredRay) *
+						 RayColor(ScatteredRay, World, Light, Depth - 1) / PDFValue;
 }
 
 TraceWorld World;
@@ -1091,13 +1867,24 @@ void Render(int StartX, int StartY, int EndX, int EndY, int Width, int Height, i
 		for (int X = StartX; X < EndX; ++X)
 		{
 			Vector3 Color;
-			for (int SampleCount = 0; SampleCount < SamplePerPixel; ++SampleCount)
-			{
-				auto U = (float)(X + Random()) / Width;
-				auto V = (float)(Y + Random()) / Height;
 
-				auto RayInstance = WorldCamera->GetRay(U, V);
-				Color += RayColor(RayInstance, RenderWorld, MaxRenderDepth);
+			while (true)
+			{
+				Color = Vector3(0.fx, 0.fx, 0.fx);
+
+				for (int SampleCount = 0; SampleCount < SamplePerPixel; ++SampleCount)
+				{
+					auto U = (float)(X + Random()) / Width;
+					auto V = (float)(Y + Random()) / Height;
+
+					auto RayInstance = WorldCamera->GetRay(U, V);
+					Color += RayColor(RayInstance, RenderWorld, &GlobalLight, MaxRenderDepth);
+				}
+
+				if (!IsBadPoint(Color))
+				{
+					break;
+				}
 			}
 
 			Buffer[OppositeCoordinate(X, Y, Width, Height)] =
@@ -1162,52 +1949,13 @@ void StartThreadRender(const int &Width, const int &Height, const int &MaxRender
 
 void Room1()
 {
-	World.Clear();
+	Vector3 VUP(0.fx, 1.fx, 0.fx);
+	WorldCamera = new Camera(Vector3(-2.fx, 2.fx, 1.fx), Vector3(0.fx, 0.fx, -1.fx), VUP, 90.fx, 640.f / 480.f);
 
-	auto GroundMaterial = new LambertianMaterial(new ConstantTexture(Vector3(0.fx, 1.fx, 0.fx)));
-	auto LightMaterial = new DiffuseLight(Vector3(0.fx, 1.fx, 0.fx));
-	auto Glass = new DielectricMaterial(1.5);
-
-	auto Ground = new SphereObject(Vector3(0.fx, -100.5fx, -1.fx), 100.fx, GroundMaterial);
-	auto Light = new SphereObject(Vector3(0.fx, 0.fx, -1.fx), 0.4fx, LightMaterial);
-	auto GlassObject = new SphereObject(Vector3(-1.fx, 0.fx, -1.fx), 0.5fx, Glass);
-
-	World.PushObject(Ground);
-	World.PushObject(Light);
-	World.PushObject(GlassObject);
-}
-void Room2()
-{
-	World.Clear();
-
-	auto Light = new DiffuseLight(Vector3(0.8fx, 0.8fx, 0.8fx));
-	auto Metal = new MetalMaterial(Vector3(1.fx, 1.fx, 1.fx), 0.4fx);
-	auto Glass = new DielectricMaterial(1.5);
-
-	auto Ground = new SphereObject(Vector3(0.fx, -100.5fx, -1.fx), 100.fx, Light);
-	auto MetalSphere = new SphereObject(Vector3(0.fx, 0.fx, -1.fx), 0.4fx, Metal);
-	auto GlassObject = new SphereObject(Vector3(-1.fx, 0.fx, -1.fx), 0.5fx, Glass);
-	World.PushObject(Ground);
-	World.PushObject(MetalSphere);
-	World.PushObject(GlassObject);
-}
-void Room3()
-{
-	World.Clear();
-
-	auto Light = new DiffuseLight(Vector3(1.fx, 1.fx, 1.fx));
-	auto Glass = new DielectricMaterial(1.5);
-
-	auto Ground = new SphereObject(Vector3(0.fx, -100.5fx, -1.fx), 100.fx, Light);
-	auto GlassObject = new SphereObject(Vector3(0.fx, 0.fx, -1.fx), 0.5fx, Glass);
-	World.PushObject(Ground);
-	World.PushObject(GlassObject);
-}
-void Room4()
-{
 	auto Light = new DiffuseLight(Vector3(1.fx, 1.fx, 1.fx));
 	SphereObject *GroudSphere = new SphereObject(Vector3(0.fx, -1000.fx, 0.fx), 1000.fx, Light);
 
+	GlobalLight.PushObject(GroudSphere);
 	World.PushObject(GroudSphere);
 
 	int i = 1;
@@ -1262,9 +2010,12 @@ void Room4()
 	World.PushObject(Sphere2);
 	World.PushObject(Sphere3);
 }
-void Room5()
+void Room2()
 {
-	auto Light = new DiffuseLight(Vector3(1.fx, 1.fx, 1.fx));
+	Vector3 VUP(0.fx, 1.fx, 0.fx);
+	WorldCamera = new Camera(Vector3(-2.fx, 2.fx, 1.fx), Vector3(0.fx, 0.fx, -1.fx), VUP, 90.fx, 640.f / 480.f);
+
+	auto Light = new DiffuseLight(Vector3(0.7fx, 0.7fx, 0.7fx));
 
 	LambertianMaterial *Lambertian = new LambertianMaterial(new CheckerTexture(
 		new ConstantTexture(Vector3(1.fx, 1.fx, 1.fx)), new ConstantTexture(Vector3(0.fx, 0.fx, 0.fx))));
@@ -1305,6 +2056,10 @@ void Room5()
 				{
 					SphereObject *Sphere = new SphereObject(Center, 0.2fx, Light);
 
+					if (GlobalLight.Objects.empty())
+					{
+						GlobalLight.PushObject(Sphere);
+					}
 					World.PushObject(Sphere);
 				}
 			}
@@ -1322,61 +2077,138 @@ void Room5()
 	World.PushObject(Sphere2);
 	World.PushObject(Sphere3);
 }
+void Room3()
+{
+	Vector3 VUP(0.fx, 1.fx, 0.fx);
+	WorldCamera =
+		new Camera(Vector3(278.fx, 278.fx, -800.fx), Vector3(278.fx, 278.fx, 0.fx), VUP, 40.fx, 640.f / 480.f);
+
+	World.Clear();
+
+	auto Red = new LambertianMaterial(new ConstantTexture(Vector3(0.65, 0.05, 0.05)));
+	auto White = new LambertianMaterial(new ConstantTexture(Vector3(0.73, 0.73, 0.73)));
+	auto Metal = new MetalMaterial(Vector3(0.8fx, 0.85fx, 0.88fx), 0.0fx);
+	auto Green = new LambertianMaterial(new ConstantTexture(Vector3(0.12, 0.45, 0.15)));
+	auto Light = new DiffuseLight(Vector3(15.fx, 15.fx, 15.fx));
+
+	auto LightObject = new FlipFace(new XZRect(213, 343, 227, 332, 554, Light));
+
+	World.PushObject(new FlipFace(new YZRect(0, 555, 0, 555, 555, Green)));
+	World.PushObject(new YZRect(0, 555, 0, 555, 0, Red));
+	World.PushObject(LightObject);
+	World.PushObject(new FlipFace(new XZRect(0, 555, 0, 555, 555, White)));
+	World.PushObject(new XZRect(0, 555, 0, 555, 0, White));
+	World.PushObject(new FlipFace(new XYRect(0, 555, 0, 555, 555, White)));
+
+	GlobalLight.PushObject(LightObject->ObjectRef);
+
+	World.PushObject(
+		new Translate(new RotateY(new Cube(Vector3(0.fx, 0.fx, 0.fx), Vector3(165.fx, 330.fx, 165.fx), White), 15.fx),
+					  Vector3(265.fx, 0.fx, 295.fx)));
+	World.PushObject(new Translate(new RotateY(new SphereObject(Vector3(190.fx, 90.fx, 190.fx), 90.fx, Metal), -18.fx),
+								   Vector3(130.fx, 0.fx, 65.fx)));
+}
+void Room4()
+{
+	Vector3 VUP(0.fx, 1.fx, 0.fx);
+	WorldCamera = new Camera(Vector3(478.fx, 278.fx, -600.fx), Vector3(278.fx, 278.fx, 0.fx), VUP, 40.fx,
+							 640.fx / 480.fx, 0.fx, 10.fx);
+
+	auto Ground = new LambertianMaterial(new ConstantTexture(Vector3(0.48, 0.83, 0.53)));
+
+	const int BoxesCount = 20.fx;
+	for (int I = 0; I < BoxesCount; I++)
+	{
+		for (int J = 0; J < BoxesCount; J++)
+		{
+			auto W = 100.fx;
+			auto X0 = -1000.fx + FloatX(I) * W;
+			auto Z0 = -1000.fx + FloatX(J) * W;
+			auto Y0 = 0.fx;
+			auto X1 = X0 + W;
+			auto Y1 = Random(1.fx, 101.fx);
+			auto Z1 = Z0 + W;
+
+			World.PushObject(new Cube(Vector3(X0, Y0, Z0), Vector3(X1, Y1, Z1), Ground));
+		}
+	}
+
+	World.PushObject(new SphereObject(Vector3(360.fx, 150.fx, 145.fx), 70.fx, new DielectricMaterial(1.5fx)));
+
+	auto Light = new DiffuseLight(Vector3(10.fx, 10.fx, 10.fx));
+	auto LightBox = new FlipFace(new XZRect(123, 423, 147, 412, 550.fx, Light));
+
+	TraceWorld *Boxes = new TraceWorld;
+	auto White = new LambertianMaterial(new ConstantTexture(Vector3(0.73, 0.73, 0.73)));
+	int SphereCount = 1000;
+	for (int Count = 0; Count < SphereCount; ++Count)
+	{
+		Boxes->PushObject(new SphereObject(Vector3::Random(0.fx, 165.fx), 10, White));
+	}
+
+	World.PushObject(new SphereObject(Vector3(400.fx, 200.fx, 400.fx), 100.fx,
+									  new MetalMaterial(Vector3(0.7fx, 0.68fx, 0.6fx), 0.fx)));
+	World.PushObject(new Translate(new RotateY(new BVHNode(*Boxes, 0.0fx, 1.0fx), 15), Vector3(-100, 270, 395)));
+
+	World.PushObject(LightBox);
+	GlobalLight.PushObject(LightBox->ObjectRef);
+}
 
 int main()
 {
 	const int Width = 640;
 	const int Height = 480;
-	int SamplePerPixel = 200;
+	int SamplePerPixel = 100;
 	const int MaxRenderDepth = 50;
 	bool UseMulThreadRender = true;
-	bool UseBVH = false;
+	bool UseBVH = true;
 	const FloatX AspectRatio = FloatX(Width) / FloatX(Height);
 
 	initgraph(Width, Height, EW_SHOWCONSOLE);
 
-	Vector3 VUP(0.fx, 1.fx, 0.fx);
-	WorldCamera = new Camera(Vector3(-2.fx, 2.fx, 1.fx), Vector3(0.fx, 0.fx, -1.fx), VUP, 90.fx, AspectRatio);
-
 	auto Buffer = GetImageBuffer();
+	int RoomNumber = 0;
 
 	while (true)
 	{
 		wchar_t Buffer[2];
-		InputBox(Buffer, 2, L"将要渲染的场景（1~5）");
+		InputBox(Buffer, 2, L"将要渲染的场景（1~4）");
 
 		if (Buffer[0] == L'1')
 		{
+			RoomNumber = 1;
+
 			Room1();
 			break;
 		}
 		if (Buffer[0] == L'2')
 		{
+			RoomNumber = 2;
+
 			Room2();
 			break;
 		}
 		if (Buffer[0] == L'3')
 		{
+			RoomNumber = 3;
+
 			Room3();
 			break;
 		}
 		if (Buffer[0] == L'4')
 		{
+			RoomNumber = 4;
+
 			Room4();
-			break;
-		}
-		if (Buffer[0] == L'5')
-		{
-			Room5();
 			break;
 		}
 	}
 
 	wchar_t SamplePerPixelString[1024];
-	InputBox(SamplePerPixelString, 1024, L"采样率（建议在 200）");
+	InputBox(SamplePerPixelString, 1024, L"采样率（1～10000），默认 200。采样率越高，效果越好，速度越慢。");
 	SamplePerPixel = _wtoi(SamplePerPixelString);
 
-	if (MessageBox(GetHWnd(), L"启用多线程渲染", L"渲染设置", MB_OKCANCEL))
+	if (MessageBox(GetHWnd(), L"启用多线程渲染", L"渲染设置", MB_OKCANCEL) != IDCANCEL)
 	{
 		UseMulThreadRender = true;
 	}
@@ -1384,7 +2216,7 @@ int main()
 	{
 		UseMulThreadRender = false;
 	}
-	if (MessageBox(GetHWnd(), L"启用 BVH", L"渲染设置", MB_OKCANCEL))
+	if (MessageBox(GetHWnd(), L"启用 BVH", L"渲染设置", MB_OKCANCEL) != IDCANCEL)
 	{
 		UseBVH = true;
 	}
@@ -1428,7 +2260,7 @@ int main()
 					auto V = (float)(Y + Random()) / Height;
 
 					auto RayInstance = WorldCamera->GetRay(U, V);
-					Color += RayColor(RayInstance, RenderWorld, MaxRenderDepth);
+					Color += RayColor(RayInstance, RenderWorld, &GlobalLight, MaxRenderDepth);
 				}
 
 				Buffer[OppositeCoordinate(X, Y, Width, Height)] = GetRawColor(Color, SamplePerPixel);
@@ -1436,13 +2268,30 @@ int main()
 		}
 	}
 
-	outtextxy(0, 0, (L"渲染用时：" + std::to_wstring((float(clock()) - Start) / 1000) + L"秒").c_str());
-	outtextxy(0, 20, (L"采样率：" + std::wstring(SamplePerPixelString) + L"pixel").c_str());
+	std::wstringstream StringStream;
+	StringStream << std::setprecision(7) << float(clock() - Start) / 1000.f;
 
-	if (UseMulThreadRender) { outtextxy(0, 40, L"多线程渲染：开"); }
-	else 					{ outtextxy(0, 40, L"多线程渲染：关"); }
-	if (UseBVH) 			{ outtextxy(0, 60, L"BVH 优化：开");  }
-	else 					{ outtextxy(0, 60, L"BVH 优化：关");  }
+	outtextxy(0, 0, (L"渲染用时：" + StringStream.str() + L" 秒").c_str());
+	outtextxy(0, 20, (L"采样率：" + std::to_wstring(SamplePerPixel) + L" spp").c_str());
+
+	if (UseMulThreadRender)
+	{
+		outtextxy(0, 40, L"多线程渲染：开");
+	}
+	else
+	{
+		outtextxy(0, 40, L"多线程渲染：关");
+	}
+	if (UseBVH)
+	{
+		outtextxy(0, 60, L"BVH 优化：开");
+	}
+	else
+	{
+		outtextxy(0, 60, L"BVH 优化：关");
+	}
+
+	outtextxy(0, 80, (L"Room " + std::to_wstring(RoomNumber)).c_str());
 
 	_getch();
 
