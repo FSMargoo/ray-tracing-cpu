@@ -3,7 +3,7 @@
 
 ## 代码运行截图
 <div align="center">
-    <img decoding="async" src="./Capture 1.png" width="100%">
-    <img decoding="async" src="./Capture 2.png" width="100%">
-    <img decoding="async" src="./Capture 3.png" width="100%">
+    <img decoding="async" src="./capture 1.png" width="100%">
+    <img decoding="async" src="./capture 2.png" width="100%">
+    <img decoding="async" src="./capture 3.png" width="100%">
 </div>
